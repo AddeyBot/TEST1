@@ -1,19 +1,59 @@
-# Starter pipeline
-# Start with a minimal pipeline that you can customize to build and deploy your code.
-# Add steps that build, run tests, deploy, and more:
-# https://aka.ms/yaml
+# This template contains jobs to run unit tests on the interactive test agents.
 
-trigger:
-- master
+parameters:
+  platform: ''
+  reimageServiceConnection: ''
+  reimageSubscriptionId: ''
+  reimageResourceGroup: ''
 
-pool:
-  vmImage: 'ubuntu-latest'
+jobs:
+- job: UnitTests${{ parameters.platform }}
+  displayName: UnitTests ${{ parameters.platform }}
+  dependsOn: Build${{ parameters.platform }}
+  pool:
+    name: Essential Experiences Interactive
+  workspace:
+    clean: outputs
+  variables:
+    skipComponentGovernanceDetection: true
+  steps:
+  - checkout: none
 
-steps:
-- script: echo Hello, world!
-  displayName: 'Run a one-line script'
+  - powershell: Write-Host "##vso[task.setvariable variable=agentInstanceId;isOutput=true]$($env:AgentName -replace '\D+' -as [int])"
+    name: LogAgentStep
+    displayName: Log this agent's instance for later cleanup
+    env:
+      AgentName: $(Agent.Name)
+  
+  - task: DownloadBuildArtifacts@0
+    displayName: Download CalculatorUnitTests
+    inputs:
+      artifactName: drop
+      itemPattern: drop/Release/${{ parameters.platform }}/CalculatorUnitTests/AppPackages/CalculatorUnitTests_Test/**
 
-- script: |
-    echo Add other tasks to build, test, and deploy your project.
-    echo See https://aka.ms/yaml
-  displayName: 'Run a multi-line script'
+  - task: PowerShell@2
+    displayName: Install Certificate
+    inputs:
+      filePath: $(Build.ArtifactStagingDirectory)\drop\Release\${{ parameters.platform }}\CalculatorUnitTests\AppPackages\CalculatorUnitTests_Test\Add-AppDevPackage.ps1
+      arguments: -CertificatePath $(Build.ArtifactStagingDirectory)\drop\Release\${{ parameters.platform }}\CalculatorUnitTests\AppPackages\CalculatorUnitTests_Test\CalculatorUnitTests.cer -Force
+
+  - task: VSTest@2
+    displayName: Run CalculatorUnitTests
+    inputs:
+      testAssemblyVer2: $(Build.ArtifactStagingDirectory)\drop\Release\${{ parameters.platform }}\CalculatorUnitTests\AppPackages\CalculatorUnitTests_Test\CalculatorUnitTests.appx
+      otherConsoleOptions: /Platform:${{ parameters.platform }}
+
+- job: CleanUpUnitTests${{ parameters.platform }}
+  dependsOn: UnitTests${{ parameters.platform }}
+  condition: and(always(), ne(dependencies.UnitTests${{ parameters.platform }}.Outputs['LogAgentStep.agentInstanceId'], ''))
+  pool: server
+  variables:
+    agentInstanceId: $[ dependencies.UnitTests${{ parameters.platform }}.outputs['LogAgentStep.agentInstanceId'] ]
+  steps:
+  - task: InvokeRESTAPI@1
+    displayName: Reimage test machine
+    inputs:
+      connectionType: connectedServiceNameARM
+      azureServiceConnection: ${{ parameters.reimageServiceConnection }}
+      urlSuffix: subscriptions/${{ parameters.reimageSubscriptionId }}/resourceGroups/${{ parameters.reimageResourceGroup }}/providers/Microsoft.Compute/virtualMachineScaleSets/essential/reimage?api-version=2018-10-01
+      body: '{ "instanceIds": ["$(agentInstanceId)"] }'
